@@ -8,11 +8,24 @@ import select
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, TextIO
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, TextIO
 
 from git import Commit, GitCommandError, Repo
 
 ZERO_COMMIT = "0" * 40
+TRAILER_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):\s*(.+)$")
+POPULAR_TRAILERS = [
+    "Signed-off-by",
+    "Co-authored-by",
+    "Reviewed-by",
+    "Acked-by",
+    "Tested-by",
+    "Reported-by",
+    "Suggested-by",
+    "Reviewed-on",
+    "Bug",
+    "Fixes",
+]
 
 
 @dataclass(frozen=True)
@@ -148,6 +161,29 @@ def _find_pattern_violations(
     if subject_only:
         text = text.splitlines()[0] if text else ""
     return [pattern for pattern, regex in compiled if regex.search(text)]
+
+
+def _normalize_trailer_name(name: str, *, case_sensitive: bool) -> str:
+    normalized = name.strip()
+    return normalized if case_sensitive else normalized.casefold()
+
+
+def extract_trailers(message: str) -> List[tuple[str, str]]:
+    trailers: List[tuple[str, str]] = []
+    lines = message.rstrip().splitlines()
+    collecting = False
+    for line in reversed(lines):
+        if not line.strip():
+            if collecting:
+                break
+            continue
+        match = TRAILER_PATTERN.match(line)
+        if not match:
+            break
+        collecting = True
+        trailers.append((match.group(1), match.group(2)))
+    trailers.reverse()
+    return trailers
 
 
 def require_signed_commits(argv: Optional[List[str]] = None) -> int:
@@ -312,12 +348,102 @@ def forbid_commit_message_patterns_on_push(argv: Optional[List[str]] = None) -> 
     return 1
 
 
+def forbid_trailers_on_push(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Block pushed commits that contain forbidden commit trailers."
+    )
+    parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the git repository (defaults to current directory).",
+    )
+    parser.add_argument(
+        "--range",
+        dest="ranges",
+        action="append",
+        default=[],
+        help="Commit range to inspect, e.g. HEAD~5..HEAD. Can be repeated.",
+    )
+    parser.add_argument(
+        "--commit",
+        dest="commits",
+        action="append",
+        default=[],
+        help="Specific commit SHA to validate. Can be repeated.",
+    )
+    parser.add_argument(
+        "--trailer",
+        dest="trailers",
+        action="append",
+        default=[],
+        help="Additional trailer name to forbid. Can be supplied multiple times.",
+    )
+    parser.add_argument(
+        "--allow-trailer",
+        dest="allow_trailers",
+        action="append",
+        default=[],
+        help="Trailer names to allow even if they are part of the default forbidden list.",
+    )
+    parser.add_argument(
+        "--case-sensitive",
+        action="store_true",
+        help="Match trailer names case-sensitively (defaults to case-insensitive).",
+    )
+
+    args = parser.parse_args(argv)
+
+    stdin_ranges = read_pre_push_ranges(sys.stdin)
+    resolved_ranges = combine_ranges(
+        ranges=args.ranges, commits=args.commits, stdin_ranges=stdin_ranges
+    )
+
+    case_sensitive = args.case_sensitive
+    allowed: Set[str] = {
+        _normalize_trailer_name(name, case_sensitive=case_sensitive)
+        for name in args.allow_trailers
+    }
+    forbidden: Set[str] = set()
+    for name in POPULAR_TRAILERS:
+        normalized = _normalize_trailer_name(name, case_sensitive=case_sensitive)
+        if normalized not in allowed:
+            forbidden.add(normalized)
+    for name in args.trailers:
+        forbidden.add(_normalize_trailer_name(name, case_sensitive=case_sensitive))
+
+    repo = Repo(args.repo)
+    violations: List[tuple[str, List[str]]] = []
+    for commit in iter_commits_for_ranges(repo, resolved_ranges):
+        message = commit.message
+        if isinstance(message, bytes):
+            message = message.decode("utf-8", errors="replace")
+        disallowed: List[str] = []
+        for trailer_name, _ in extract_trailers(message or ""):
+            normalized = _normalize_trailer_name(
+                trailer_name, case_sensitive=case_sensitive
+            )
+            if normalized in forbidden:
+                disallowed.append(trailer_name)
+        if disallowed:
+            violations.append((commit.hexsha, disallowed))
+
+    if not violations:
+        return 0
+
+    lines = ["Commit trailers are forbidden:"]
+    for hexsha, trailers in violations:
+        lines.append(f"- {hexsha}: {', '.join(trailers)}")
+    print("\n".join(lines), file=sys.stderr)
+    return 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
     commands: Dict[str, Callable[[Optional[List[str]]], int]] = {
         "require-signed-commits": require_signed_commits,
         "forbid-commit-message-patterns": forbid_commit_message_patterns,
         "forbid-commit-message-patterns-on-push": forbid_commit_message_patterns_on_push,
+        "forbid-trailers-on-push": forbid_trailers_on_push,
     }
 
     if args and args[0] in commands:

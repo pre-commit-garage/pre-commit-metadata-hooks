@@ -19,3 +19,11 @@
   stages: [pre-push]
   pass_filenames: false
   always_run: true
+
+- id: forbid-trailers-on-push
+  name: Forbid commit trailers on push
+  entry: pre-commit-metadata-hooks forbid-trailers-on-push
+  language: python
+  stages: [pre-push]
+  pass_filenames: false
+  always_run: true
