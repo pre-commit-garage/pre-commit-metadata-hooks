@@ -14,7 +14,7 @@ from git import Commit, GitCommandError, Repo
 
 ZERO_COMMIT = "0" * 40
 TRAILER_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):\s*(.+)$")
-POPULAR_TRAILERS = [
+SUPPORTED_TRAILERS = [
     "Signed-off-by",
     "Co-authored-by",
     "Reviewed-by",
@@ -350,7 +350,7 @@ def forbid_commit_message_patterns_on_push(argv: Optional[List[str]] = None) -> 
 
 def forbid_trailers_on_push(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Block pushed commits that contain forbidden commit trailers."
+        description="Block pushed commits that contain certain supported trailers."
     )
     parser.add_argument(
         "--repo",
@@ -375,15 +375,8 @@ def forbid_trailers_on_push(argv: Optional[List[str]] = None) -> int:
         "--trailer",
         dest="trailers",
         action="append",
-        default=[],
-        help="Additional trailer name to forbid. Can be supplied multiple times.",
-    )
-    parser.add_argument(
-        "--allow-trailer",
-        dest="allow_trailers",
-        action="append",
-        default=[],
-        help="Trailer names to allow even if they are part of the default forbidden list.",
+        required=True,
+        help="Supported trailer name to forbid (repeatable).",
     )
     parser.add_argument(
         "--case-sensitive",
@@ -399,17 +392,20 @@ def forbid_trailers_on_push(argv: Optional[List[str]] = None) -> int:
     )
 
     case_sensitive = args.case_sensitive
-    allowed: Set[str] = {
-        _normalize_trailer_name(name, case_sensitive=case_sensitive)
-        for name in args.allow_trailers
-    }
+    if case_sensitive:
+        supported = {name: name for name in SUPPORTED_TRAILERS}
+    else:
+        supported = {name.casefold(): name for name in SUPPORTED_TRAILERS}
+
     forbidden: Set[str] = set()
-    for name in POPULAR_TRAILERS:
-        normalized = _normalize_trailer_name(name, case_sensitive=case_sensitive)
-        if normalized not in allowed:
-            forbidden.add(normalized)
     for name in args.trailers:
-        forbidden.add(_normalize_trailer_name(name, case_sensitive=case_sensitive))
+        normalized = _normalize_trailer_name(name, case_sensitive=case_sensitive)
+        if normalized not in supported:
+            raise SystemExit(
+                f"unsupported trailer name {name!r}; supported values are: "
+                + ", ".join(sorted(supported.values()))
+            )
+        forbidden.add(normalized)
 
     repo = Repo(args.repo)
     violations: List[tuple[str, List[str]]] = []
