@@ -9,9 +9,9 @@ Metadata-focused hooks for `pre-commit` that keep commit history clean before it
 | `require-signed-commits` | `pre-push` | Blocks pushes that contain any commit missing a `gpgsig` header. |
 | `forbid-commit-message-patterns` | `commit-msg` | Fails the commit if the subject (or whole message) matches one of the supplied regexes. |
 | `forbid-commit-message-patterns-on-push` | `pre-push` | Re-scans every commit about to be pushed for forbidden regex patterns. Useful when merges or rebases introduce bad subjects after the client-side commit-msg hook ran. |
-| `forbid-trailers-on-push` | `pre-push` | Rejects pushes containing trailers such as `Signed-off-by`, `Co-authored-by`, `Reviewed-by`, `Acked-by`, `Tested-by`, `Reported-by`, `Suggested-by`, `Reviewed-on`, `Bug`, or `Fixes`. Extra trailers can be blocked or allow-listed per repo. |
+| `forbid-trailers-on-push` | `pre-push` | Rejects pushes that contain supported trailers you explicitly pick. This keeps the check tied to a known list so typos such as `Co-auhtored-by` fail early. |
 
-Each hook exposes CLI flags so you can tailor the behavior: regex hooks accept `--pattern`, `--ignore-case`, and `--subject-only`; the trailer hook supports `--trailer`, `--allow-trailer`, and `--case-sensitive`.
+Each hook exposes CLI flags so you can tailor the behavior: regex hooks accept `--pattern`, `--ignore-case`, and `--subject-only`; the trailer hook accepts one or more `--trailer` arguments and an optional `--case-sensitive` flag.
 
 ## Installation
 
@@ -46,12 +46,27 @@ repos:
       - id: forbid-trailers-on-push
         args:
           - --trailer
-          - Ticket
-          - --allow-trailer
           - Signed-off-by
+          - --trailer
+          - Co-authored-by
 ```
 
 Feel free to drop stages you do not need; each hook already declares sensible defaults.
+
+### Supported commit trailers
+
+Only the following trailers are recognized by `forbid-trailers-on-push` (match is case-insensitive unless you supply `--case-sensitive`):
+
+- Acked-by
+- Bug
+- Co-authored-by
+- Fixes
+- Reported-by
+- Reviewed-by
+- Reviewed-on
+- Signed-off-by
+- Suggested-by
+- Tested-by
 
 ## CLI usage
 

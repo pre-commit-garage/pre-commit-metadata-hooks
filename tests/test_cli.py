@@ -291,14 +291,14 @@ def test_forbid_commit_message_patterns_on_push_allows_clean_commits(
     assert result == 0
 
 
-def test_forbid_trailers_on_push_blocks_default(monkeypatch, capsys) -> None:
+def test_forbid_trailers_on_push_blocks_supported(monkeypatch, capsys) -> None:
     commit = DummyCommit(
         "d" * 40,
         message="feat: add\n\nbody\n\nSigned-off-by: Dev <dev@example.com>",
     )
     _patch_pre_push(monkeypatch, commit)
 
-    result = cli.forbid_trailers_on_push([])
+    result = cli.forbid_trailers_on_push(["--trailer", "Signed-off-by"])
 
     assert result == 1
     output = capsys.readouterr().err
@@ -306,26 +306,28 @@ def test_forbid_trailers_on_push_blocks_default(monkeypatch, capsys) -> None:
     assert "Signed-off-by" in output
 
 
-def test_forbid_trailers_on_push_respects_allow(monkeypatch) -> None:
+def test_forbid_trailers_on_push_rejects_unknown_trailer(monkeypatch) -> None:
     commit = DummyCommit(
-        "e" * 40,
-        message="feat: add\n\nSigned-off-by: Dev <dev@example.com>",
+        "e" * 40, message="feat: add\n\nSigned-off-by: Dev <dev@example.com>"
     )
     _patch_pre_push(monkeypatch, commit)
 
-    result = cli.forbid_trailers_on_push(["--allow-trailer", "Signed-off-by"])
+    with pytest.raises(SystemExit):
+        cli.forbid_trailers_on_push(["--trailer", "Co-auhtored-by"])
 
-    assert result == 0
 
-
-def test_forbid_trailers_on_push_supports_extra(monkeypatch, capsys) -> None:
+def test_forbid_trailers_on_push_multi_trailers(monkeypatch, capsys) -> None:
     commit = DummyCommit(
         "f" * 40,
-        message="feat: add\n\nTicket: 123",
+        message="feat: add\n\nCo-authored-by: CI <ci@example.com>\nSigned-off-by: Dev <dev@example.com>",
     )
     _patch_pre_push(monkeypatch, commit)
 
-    result = cli.forbid_trailers_on_push(["--trailer", "Ticket"])
+    result = cli.forbid_trailers_on_push(
+        ["--trailer", "Co-authored-by", "--trailer", "Signed-off-by"]
+    )
 
     assert result == 1
-    assert "Ticket" in capsys.readouterr().err
+    output = capsys.readouterr().err
+    assert "Co-authored-by" in output
+    assert "Signed-off-by" in output
