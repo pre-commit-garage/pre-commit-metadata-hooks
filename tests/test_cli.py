@@ -18,10 +18,15 @@ from pre_commit_metadata_hooks.cli import (
 
 class DummyCommit:
     def __init__(
-        self, hexsha: str, summary: str = "", gpgsig: str | None = None
+        self,
+        hexsha: str,
+        summary: str = "",
+        message: str = "",
+        gpgsig: str | None = None,
     ) -> None:
         self.hexsha = hexsha
         self.summary = summary
+        self.message = message
         self.gpgsig = gpgsig
 
 
@@ -230,3 +235,57 @@ def test_main_dispatches_to_subcommand(monkeypatch) -> None:
 
     assert cli.main(["forbid-commit-message-patterns", "msg.txt"]) == 0
     assert called["args"] == ["msg.txt"]
+
+
+def _patch_pre_push(monkeypatch, commit: DummyCommit) -> None:
+    class RepoWithCommits:
+        def iter_commits(self, _: str):
+            yield commit
+
+    monkeypatch.setattr(
+        cli,
+        "read_pre_push_ranges",
+        lambda stdin: [RevRange(start=None, end="HEAD")],
+    )
+    monkeypatch.setattr(
+        cli,
+        "combine_ranges",
+        lambda **kwargs: [RevRange(start=None, end="HEAD")],
+    )
+    monkeypatch.setattr(cli, "Repo", lambda repo_path: RepoWithCommits())
+
+
+def test_forbid_commit_message_patterns_on_push(monkeypatch, capsys) -> None:
+    commit = DummyCommit("a" * 40, message="WIP: fix later")
+    _patch_pre_push(monkeypatch, commit)
+
+    result = cli.forbid_commit_message_patterns_on_push(
+        ["--pattern", r"^wip\b", "--ignore-case"]
+    )
+
+    assert result == 1
+    output = capsys.readouterr().err
+    assert commit.hexsha in output
+    assert r"^wip\b" in output
+
+
+def test_forbid_commit_message_patterns_on_push_subject_only(monkeypatch) -> None:
+    commit = DummyCommit("b" * 40, message="feat: release\n\nWIP notes")
+    _patch_pre_push(monkeypatch, commit)
+
+    result = cli.forbid_commit_message_patterns_on_push(
+        ["--pattern", r"WIP", "--subject-only"]
+    )
+
+    assert result == 0
+
+
+def test_forbid_commit_message_patterns_on_push_allows_clean_commits(
+    monkeypatch,
+) -> None:
+    commit = DummyCommit("c" * 40, message="feat: ok")
+    _patch_pre_push(monkeypatch, commit)
+
+    result = cli.forbid_commit_message_patterns_on_push(["--pattern", r"WIP"])
+
+    assert result == 0

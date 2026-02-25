@@ -11,3 +11,11 @@
   entry: pre-commit-metadata-hooks forbid-commit-message-patterns
   language: python
   stages: [commit-msg]
+
+- id: forbid-commit-message-patterns-on-push
+  name: Forbid commit message patterns on push
+  entry: pre-commit-metadata-hooks forbid-commit-message-patterns-on-push
+  language: python
+  stages: [pre-push]
+  pass_filenames: false
+  always_run: true
