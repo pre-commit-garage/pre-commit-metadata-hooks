@@ -136,7 +136,7 @@ def test_main_returns_zero_for_signed(monkeypatch) -> None:
     )
     monkeypatch.setattr(cli, "Repo", lambda repo_path: Repo())
 
-    assert cli.main([]) == 0
+    assert cli.main(["require-signed-commits"]) == 0
 
 
 def test_main_reports_unsigned_commits(monkeypatch, capsys) -> None:
@@ -154,7 +154,7 @@ def test_main_reports_unsigned_commits(monkeypatch, capsys) -> None:
     )
     monkeypatch.setattr(cli, "Repo", lambda repo_path: Repo())
 
-    result = cli.main([])
+    result = cli.main(["require-signed-commits"])
 
     assert result == 1
     assert unsigned.hexsha in capsys.readouterr().err
@@ -235,6 +235,16 @@ def test_main_dispatches_to_subcommand(monkeypatch) -> None:
 
     assert cli.main(["forbid-commit-message-patterns", "msg.txt"]) == 0
     assert called["args"] == ["msg.txt"]
+
+
+def test_main_requires_command() -> None:
+    with pytest.raises(SystemExit):
+        cli.main([])
+
+
+def test_main_rejects_unknown_command() -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["unknown-command"])
 
 
 def _patch_pre_push(monkeypatch, commit: DummyCommit) -> None:

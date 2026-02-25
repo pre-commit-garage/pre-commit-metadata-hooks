@@ -442,11 +442,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "forbid-trailers-on-push": forbid_trailers_on_push,
     }
 
-    if args and args[0] in commands:
-        command = args[0]
-        command_args: Optional[List[str]] = args[1:]
-    else:
-        command = "require-signed-commits"
-        command_args = args
+    if not args:
+        available = ", ".join(sorted(commands))
+        raise SystemExit(f"command required; choose from: {available}")
+
+    command, *command_args = args
+    if command not in commands:
+        available = ", ".join(sorted(commands))
+        raise SystemExit(f"unknown command {command!r}; choose from: {available}")
 
     return commands[command](command_args)

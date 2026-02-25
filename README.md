@@ -82,10 +82,10 @@ Commands:
   forbid-trailers-on-push
 ```
 
-Running without a command keeps the legacy behavior of `require-signed-commits`:
+Invoke the command you need explicitly, e.g. to inspect a custom range with the signature check:
 
 ```sh
-pre-commit-metadata-hooks --range origin/main..HEAD
+pre-commit-metadata-hooks require-signed-commits --range origin/main..HEAD
 ```
 
 All pre-push commands accept `--repo`, `--range`, and `--commit`, read ranges from Git's `pre-push` stdin when available, and fall back to `HEAD` when no range is supplied.
