@@ -129,6 +129,27 @@ def format_unsigned_message(unsigned: List[Commit]) -> str:
     return "\n".join(pieces)
 
 
+def _compile_patterns(
+    patterns: Iterable[str], flags: int
+) -> List[tuple[str, re.Pattern[str]]]:
+    compiled: List[tuple[str, re.Pattern[str]]] = []
+    for pattern in patterns:
+        try:
+            compiled.append((pattern, re.compile(pattern, flags)))
+        except re.error as exc:
+            raise SystemExit(f"invalid pattern {pattern!r}: {exc}") from exc
+    return compiled
+
+
+def _find_pattern_violations(
+    message: str, compiled: Iterable[tuple[str, re.Pattern[str]]], subject_only: bool
+) -> List[str]:
+    text = message
+    if subject_only:
+        text = text.splitlines()[0] if text else ""
+    return [pattern for pattern, regex in compiled if regex.search(text)]
+
+
 def require_signed_commits(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Block unsigned commits by validating GPG signatures before pushing."
@@ -200,21 +221,11 @@ def forbid_commit_message_patterns(argv: Optional[List[str]] = None) -> int:
     except OSError as exc:  # pragma: no cover - exercised in runtime environments
         raise SystemExit(f"failed to read commit message file: {exc}") from exc
 
-    if args.subject_only:
-        message = message.splitlines()[0] if message else ""
-
     flags = re.MULTILINE
     if args.ignore_case:
         flags |= re.IGNORECASE
-
-    violations: List[str] = []
-    for pattern in args.patterns:
-        try:
-            compiled = re.compile(pattern, flags)
-        except re.error as exc:
-            raise SystemExit(f"invalid pattern {pattern!r}: {exc}") from exc
-        if compiled.search(message):
-            violations.append(pattern)
+    compiled_patterns = _compile_patterns(args.patterns, flags)
+    violations = _find_pattern_violations(message, compiled_patterns, args.subject_only)
 
     if not violations:
         return 0
@@ -225,11 +236,88 @@ def forbid_commit_message_patterns(argv: Optional[List[str]] = None) -> int:
     return 1
 
 
+def forbid_commit_message_patterns_on_push(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Block pushed commits whose messages match forbidden regular expressions."
+    )
+    parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the git repository (defaults to current directory).",
+    )
+    parser.add_argument(
+        "--range",
+        dest="ranges",
+        action="append",
+        default=[],
+        help="Commit range to inspect, e.g. HEAD~5..HEAD. Can be repeated.",
+    )
+    parser.add_argument(
+        "--commit",
+        dest="commits",
+        action="append",
+        default=[],
+        help="Specific commit SHA to validate. Can be repeated.",
+    )
+    parser.add_argument(
+        "--pattern",
+        action="append",
+        dest="patterns",
+        required=True,
+        help="Regular expression describing disallowed content. Can be supplied multiple times.",
+    )
+    parser.add_argument(
+        "--ignore-case",
+        action="store_true",
+        help="Match patterns case-insensitively.",
+    )
+    parser.add_argument(
+        "--subject-only",
+        action="store_true",
+        help="Only inspect the subject (first line) of each commit message.",
+    )
+
+    args = parser.parse_args(argv)
+
+    stdin_ranges = read_pre_push_ranges(sys.stdin)
+    resolved_ranges = combine_ranges(
+        ranges=args.ranges, commits=args.commits, stdin_ranges=stdin_ranges
+    )
+
+    flags = re.MULTILINE
+    if args.ignore_case:
+        flags |= re.IGNORECASE
+
+    compiled_patterns = _compile_patterns(args.patterns, flags)
+
+    repo = Repo(args.repo)
+    violations: List[tuple[str, List[str]]] = []
+    for commit in iter_commits_for_ranges(repo, resolved_ranges):
+        message = commit.message
+        if isinstance(message, bytes):
+            message = message.decode("utf-8", errors="replace")
+        matches = _find_pattern_violations(
+            message or "", compiled_patterns, args.subject_only
+        )
+        if matches:
+            violations.append((commit.hexsha, matches))
+
+    if not violations:
+        return 0
+
+    lines = ["Commit messages contain forbidden patterns:"]
+    for hexsha, matches in violations:
+        lines.append(f"- {hexsha}: {', '.join(matches)}")
+    print("\n".join(lines), file=sys.stderr)
+    return 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
     commands: Dict[str, Callable[[Optional[List[str]]], int]] = {
         "require-signed-commits": require_signed_commits,
         "forbid-commit-message-patterns": forbid_commit_message_patterns,
+        "forbid-commit-message-patterns-on-push": forbid_commit_message_patterns_on_push,
     }
 
     if args and args[0] in commands:
