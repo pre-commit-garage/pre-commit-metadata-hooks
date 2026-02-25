@@ -1,0 +1,132 @@
+"""Unit tests for the pre-commit-metadata-hooks CLI helpers."""
+from __future__ import annotations
+
+import pytest
+from git import GitCommandError
+
+from pre_commit_metadata_hooks import cli
+from pre_commit_metadata_hooks.cli import RevRange, combine_ranges, find_unsigned_commits, iter_commits_for_ranges, parse_pre_push_lines, parse_range_arg
+
+
+class DummyCommit:
+    def __init__(self, hexsha: str, summary: str = "", gpgsig: str | None = None) -> None:
+        self.hexsha = hexsha
+        self.summary = summary
+        self.gpgsig = gpgsig
+
+
+def test_parse_pre_push_lines_filters_zero_commits() -> None:
+    base = "f" * 40
+    local = "1" * 40
+    remote = "2" * 40
+    inputs = [
+        f"refs/heads/main {local} refs/remotes/origin/main {remote}",
+        f"refs/heads/main {local} refs/remotes/origin/main {cli.ZERO_COMMIT}",
+        "invalid line",
+        "",
+    ]
+
+    ranges = parse_pre_push_lines(inputs)
+
+    assert ranges == [RevRange(start=remote, end=local), RevRange(start=None, end=local)]
+
+
+def test_parse_range_arg_handles_empty_start() -> None:
+    parsed = parse_range_arg("abc123..def456")
+    assert parsed.start == "abc123"
+    assert parsed.end == "def456"
+
+
+def test_parse_range_arg_raises_for_zero_end() -> None:
+    with pytest.raises(ValueError):
+        parse_range_arg("abc.." + "0" * 40)
+
+
+def test_combine_ranges_defaults_to_head() -> None:
+    result = combine_ranges(ranges=(), commits=(), stdin_ranges=())
+    assert result == [RevRange(start=None, end="HEAD")]
+
+
+def test_iter_commits_for_ranges_deduplicates() -> None:
+    commit = DummyCommit("a" * 40)
+
+    class StubRepo:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def iter_commits(self, rev: str):
+            self.calls.append(rev)
+            yield commit
+            yield commit
+
+    repo = StubRepo()
+    ranges = [RevRange(start="abc", end="def"), RevRange(start=None, end="ghi")]
+
+    result = list(iter_commits_for_ranges(repo, ranges))
+
+    assert result == [commit]
+    assert repo.calls == ["abc..def", "ghi"]
+
+
+def test_iter_commits_for_ranges_reports_git_errors() -> None:
+    class ErrorRepo:
+        def iter_commits(self, _: str):
+            raise GitCommandError("rev-parse", "boom")
+
+    with pytest.raises(SystemExit) as excinfo:
+        list(iter_commits_for_ranges(ErrorRepo(), [RevRange(start=None, end="HEAD")]))
+
+    assert "git error" in str(excinfo.value)
+
+
+def test_find_unsigned_commits_filters_signed() -> None:
+    signed = DummyCommit("a" * 40, gpgsig="sig")
+    unsigned = DummyCommit("b" * 40)
+
+    class RepoWithCommits:
+        def iter_commits(self, _: str):
+            yield signed
+            yield unsigned
+
+    commits = find_unsigned_commits(RepoWithCommits(), [RevRange(start=None, end="HEAD")])
+
+    assert commits == [unsigned]
+
+
+def test_format_unsigned_message_includes_hexsha() -> None:
+    unsigned = DummyCommit("deadbeef" * 5, summary="missing signature")
+    formatted = cli.format_unsigned_message([unsigned])
+
+    assert "Unsigned commits detected:" in formatted
+    assert unsigned.hexsha in formatted
+
+
+def test_main_returns_zero_for_signed(monkeypatch) -> None:
+    commit = DummyCommit("a" * 40, gpgsig="sig")
+
+    class Repo:
+        def iter_commits(self, _: str):
+            yield commit
+
+    monkeypatch.setattr(cli, "read_pre_push_ranges", lambda stdin: [RevRange(start=None, end="HEAD")])
+    monkeypatch.setattr(cli, "combine_ranges", lambda **kwargs: [RevRange(start=None, end="HEAD")])
+    monkeypatch.setattr(cli, "Repo", lambda repo_path: Repo())
+
+    assert cli.main([]) == 0
+
+
+def test_main_reports_unsigned_commits(monkeypatch, capsys) -> None:
+    unsigned = DummyCommit("b" * 40)
+
+    class Repo:
+        def iter_commits(self, _: str):
+            yield unsigned
+
+    monkeypatch.setattr(cli, "read_pre_push_ranges", lambda stdin: [RevRange(start=None, end="HEAD")])
+    monkeypatch.setattr(cli, "combine_ranges", lambda **kwargs: [RevRange(start=None, end="HEAD")])
+    monkeypatch.setattr(cli, "Repo", lambda repo_path: Repo())
+
+    result = cli.main([])
+
+    assert result == 1
+    assert unsigned.hexsha in capsys.readouterr().err

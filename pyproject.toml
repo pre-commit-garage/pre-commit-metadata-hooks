@@ -1,0 +1,18 @@
+[project]
+name = "pre-commit-metadata-hooks"
+version = "0.1.0"
+description = "pre-commit hooks that guard commit metadata (by default, enforce signed commits)."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "GitPython>=3.1",
+]
+[project.optional-dependencies]
+test = ["pytest>=8"]
+[project.urls]
+"Homepage" = "https://pre-commit.com/"
+[project.scripts]
+"pre-commit-metadata-hooks" = "pre_commit_metadata_hooks.cli:main"
+[build-system]
+requires = ["setuptools>=65.5", "wheel"]
+build-backend = "setuptools.build_meta"

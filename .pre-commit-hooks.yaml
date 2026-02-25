@@ -1,0 +1,7 @@
+- id: require-signed-commits
+  name: Require signed commits
+  entry: pre-commit-metadata-hooks
+  language: python
+  stages: [pre-push]
+  pass_filenames: false
+  always_run: true
