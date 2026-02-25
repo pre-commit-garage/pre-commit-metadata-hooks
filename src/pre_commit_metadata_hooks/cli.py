@@ -1,13 +1,16 @@
-"""Main CLI implementation for metadata hooks (currently GPG signature validation)."""
+"""Main CLI implementation for metadata hooks."""
+
 from __future__ import annotations
 
 import argparse
+import re
 import select
 import sys
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Optional, TextIO
+from pathlib import Path
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, TextIO
 
-from git import Commit, Repo, GitCommandError
+from git import Commit, GitCommandError, Repo
 
 ZERO_COMMIT = "0" * 40
 
@@ -46,7 +49,7 @@ def parse_range_arg(value: str) -> RevRange:
         start, end = value.split("..", 1)
         end = end.strip()
         if not end or end == ZERO_COMMIT:
-            raise ValueError(f"invalid range " f"{value!r}: end commit required")
+            raise ValueError(f"invalid range {value!r}: end commit required")
         start = start.strip()
         normalized_start = None
         if start and start != ZERO_COMMIT:
@@ -126,11 +129,15 @@ def format_unsigned_message(unsigned: List[Commit]) -> str:
     return "\n".join(pieces)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def require_signed_commits(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Block unsigned commits by validating GPG signatures before pushing."
     )
-    parser.add_argument("--repo", default=".", help="Path to the git repository (defaults to current directory).")
+    parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the git repository (defaults to current directory).",
+    )
     parser.add_argument(
         "--range",
         dest="ranges",
@@ -158,3 +165,78 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(format_unsigned_message(unsigned), file=sys.stderr)
         return 1
     return 0
+
+
+def forbid_commit_message_patterns(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Block commit messages that match forbidden regular expressions."
+    )
+    parser.add_argument(
+        "--pattern",
+        action="append",
+        dest="patterns",
+        required=True,
+        help="Regular expression describing disallowed content. Can be supplied multiple times.",
+    )
+    parser.add_argument(
+        "--ignore-case",
+        action="store_true",
+        help="Match patterns case-insensitively.",
+    )
+    parser.add_argument(
+        "--subject-only",
+        action="store_true",
+        help="Only inspect the subject (first line) of the commit message.",
+    )
+    parser.add_argument(
+        "commit_msg_file",
+        help="Path to the commit message file provided by Git.",
+    )
+
+    args = parser.parse_args(argv)
+
+    try:
+        message = Path(args.commit_msg_file).read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - exercised in runtime environments
+        raise SystemExit(f"failed to read commit message file: {exc}") from exc
+
+    if args.subject_only:
+        message = message.splitlines()[0] if message else ""
+
+    flags = re.MULTILINE
+    if args.ignore_case:
+        flags |= re.IGNORECASE
+
+    violations: List[str] = []
+    for pattern in args.patterns:
+        try:
+            compiled = re.compile(pattern, flags)
+        except re.error as exc:
+            raise SystemExit(f"invalid pattern {pattern!r}: {exc}") from exc
+        if compiled.search(message):
+            violations.append(pattern)
+
+    if not violations:
+        return 0
+
+    lines = ["Commit message contains forbidden patterns:"]
+    lines.extend(f"- {pattern}" for pattern in violations)
+    print("\n".join(lines), file=sys.stderr)
+    return 1
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = list(argv) if argv is not None else sys.argv[1:]
+    commands: Dict[str, Callable[[Optional[List[str]]], int]] = {
+        "require-signed-commits": require_signed_commits,
+        "forbid-commit-message-patterns": forbid_commit_message_patterns,
+    }
+
+    if args and args[0] in commands:
+        command = args[0]
+        command_args: Optional[List[str]] = args[1:]
+    else:
+        command = "require-signed-commits"
+        command_args = args
+
+    return commands[command](command_args)

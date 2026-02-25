@@ -5,3 +5,9 @@
   stages: [pre-push]
   pass_filenames: false
   always_run: true
+
+- id: forbid-commit-message-patterns
+  name: Forbid commit message patterns
+  entry: pre-commit-metadata-hooks forbid-commit-message-patterns
+  language: python
+  stages: [commit-msg]
