@@ -10,9 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, TextIO
 
+from email_validator import EmailNotValidError, validate_email
 from git import Commit, GitCommandError, Repo
 
 ZERO_COMMIT = "0" * 40
+GIT_IDENT_PATTERN = re.compile(r"^.+ <(?P<email>[^>]+)> \d+ [+-]\d{4}$")
 TRAILER_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):\s*(.+)$")
 SUPPORTED_TRAILERS = [
     "Signed-off-by",
@@ -37,6 +39,13 @@ class RevRange:
         if self.start:
             return f"{self.start}..{self.end}"
         return self.end
+
+
+@dataclass(frozen=True)
+class EmailViolation:
+    label: str
+    email: str
+    reason: str
 
 
 def parse_pre_push_lines(lines: Iterable[str]) -> List[RevRange]:
@@ -127,6 +136,23 @@ def iter_commits_for_ranges(repo: Repo, ranges: Iterable[RevRange]) -> Iterator[
             raise SystemExit(f"git error while iterating {rev}: {error}")
 
 
+def iter_recent_commits(
+    repo: Repo, refs: Iterable[str], max_count: int
+) -> Iterator[Commit]:
+    seen: set[str] = set()
+    for ref in refs:
+        try:
+            for commit in repo.iter_commits(ref, max_count=max_count):
+                if commit.hexsha in seen:
+                    continue
+                seen.add(commit.hexsha)
+                yield commit
+        except GitCommandError as error:
+            raise SystemExit(
+                f"git error while iterating recent commits from {ref}: {error}"
+            )
+
+
 def find_unsigned_commits(repo: Repo, ranges: Iterable[RevRange]) -> List[Commit]:
     unsigned: List[Commit] = []
     for commit in iter_commits_for_ranges(repo, ranges):
@@ -186,6 +212,45 @@ def extract_trailers(message: str) -> List[tuple[str, str]]:
     return trailers
 
 
+def normalize_required_domain(domain: str) -> str:
+    normalized = domain.strip().lstrip("@").casefold()
+    if not normalized:
+        raise SystemExit("email domain must not be empty")
+    return normalized
+
+
+def extract_email_from_git_ident(ident: str) -> str:
+    match = GIT_IDENT_PATTERN.match(ident.strip())
+    if not match:
+        raise SystemExit(f"unexpected git identity format: {ident!r}")
+    return match.group("email")
+
+
+def check_email_domain(email: str, required_domain: str) -> Optional[tuple[str, str]]:
+    try:
+        validated = validate_email(email.strip(), check_deliverability=False)
+    except EmailNotValidError as exc:
+        return email.strip(), str(exc)
+
+    normalized_email = validated.normalized
+    if validated.domain.casefold() != required_domain:
+        return normalized_email, f"expected @{required_domain}"
+    return None
+
+
+def format_email_validation_message(
+    title: str, violations: Iterable[EmailViolation], *, hint: Optional[str] = None
+) -> str:
+    lines = [title]
+    lines.extend(
+        f"- {violation.label}: {violation.email} ({violation.reason})"
+        for violation in violations
+    )
+    if hint:
+        lines.append(hint)
+    return "\n".join(lines)
+
+
 def require_signed_commits(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Block unsigned commits by validating GPG signatures before pushing."
@@ -222,6 +287,58 @@ def require_signed_commits(argv: Optional[List[str]] = None) -> int:
         print(format_unsigned_message(unsigned), file=sys.stderr)
         return 1
     return 0
+
+
+def validate_commit_emails(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Block commits when the current Git author or committer email uses the wrong domain."
+    )
+    parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the git repository (defaults to current directory).",
+    )
+    parser.add_argument(
+        "--domain",
+        required=True,
+        help="Allowed email domain, for example company.com.",
+    )
+
+    args = parser.parse_args(argv)
+
+    required_domain = normalize_required_domain(args.domain)
+    repo = Repo(args.repo)
+    identities = {
+        "author": "GIT_AUTHOR_IDENT",
+        "committer": "GIT_COMMITTER_IDENT",
+    }
+    violations: List[EmailViolation] = []
+
+    for label, git_var in identities.items():
+        try:
+            ident = repo.git.var(git_var)
+        except GitCommandError as exc:
+            raise SystemExit(f"failed to resolve {git_var}: {exc}") from exc
+        email = extract_email_from_git_ident(ident)
+        violation = check_email_domain(email, required_domain)
+        if violation:
+            normalized_email, reason = violation
+            violations.append(
+                EmailViolation(label=label, email=normalized_email, reason=reason)
+            )
+
+    if not violations:
+        return 0
+
+    print(
+        format_email_validation_message(
+            f"Commit emails must use @{required_domain}.",
+            violations,
+            hint="Update your Git author/committer email before creating the commit.",
+        ),
+        file=sys.stderr,
+    )
+    return 1
 
 
 def forbid_commit_message_patterns(argv: Optional[List[str]] = None) -> int:
@@ -348,6 +465,92 @@ def forbid_commit_message_patterns_on_push(argv: Optional[List[str]] = None) -> 
     return 1
 
 
+def validate_recent_commit_emails_on_push(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Block pushes that contain commits whose author or committer email uses the wrong domain."
+    )
+    parser.add_argument(
+        "--repo",
+        default=".",
+        help="Path to the git repository (defaults to current directory).",
+    )
+    parser.add_argument(
+        "--range",
+        dest="ranges",
+        action="append",
+        default=[],
+        help="Commit range to inspect, e.g. HEAD~5..HEAD. Can be repeated.",
+    )
+    parser.add_argument(
+        "--commit",
+        dest="commits",
+        action="append",
+        default=[],
+        help="Specific commit SHA to validate. Can be repeated.",
+    )
+    parser.add_argument(
+        "--domain",
+        required=True,
+        help="Allowed email domain, for example company.com.",
+    )
+    parser.add_argument(
+        "--max-count",
+        type=int,
+        default=50,
+        help="Maximum number of recent commits to inspect from each pushed tip (default: 50).",
+    )
+
+    args = parser.parse_args(argv)
+
+    if args.max_count < 1:
+        raise SystemExit("--max-count must be at least 1")
+
+    stdin_ranges = read_pre_push_ranges(sys.stdin)
+    required_domain = normalize_required_domain(args.domain)
+    refs_to_scan = [rev_range.end for rev_range in stdin_ranges]
+    refs_to_scan.extend(parse_range_arg(value).end for value in args.ranges)
+    refs_to_scan.extend(
+        sha.strip()
+        for sha in args.commits
+        if sha.strip() and sha.strip() != ZERO_COMMIT
+    )
+    if not refs_to_scan:
+        refs_to_scan = ["HEAD"]
+
+    repo = Repo(args.repo)
+    violations: List[EmailViolation] = []
+    for commit in iter_recent_commits(repo, refs_to_scan, args.max_count):
+        for role, actor in (("author", commit.author), ("committer", commit.committer)):
+            email = getattr(actor, "email", "") or ""
+            violation = check_email_domain(email, required_domain)
+            if not violation:
+                continue
+            normalized_email, reason = violation
+            violations.append(
+                EmailViolation(
+                    label=f"{commit.hexsha} {role}",
+                    email=normalized_email,
+                    reason=reason,
+                )
+            )
+
+    if not violations:
+        return 0
+
+    print(
+        format_email_validation_message(
+            f"Pushed commits must use @{required_domain} email addresses.",
+            violations,
+            hint=(
+                "Rewrite the offending commits with the correct email address, then push again. "
+                f"This hook inspected up to {args.max_count} recent commits from each pushed tip."
+            ),
+        ),
+        file=sys.stderr,
+    )
+    return 1
+
+
 def forbid_trailers_on_push(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Block pushed commits that contain certain supported trailers."
@@ -437,6 +640,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = list(argv) if argv is not None else sys.argv[1:]
     commands: Dict[str, Callable[[Optional[List[str]]], int]] = {
         "require-signed-commits": require_signed_commits,
+        "validate-commit-emails": validate_commit_emails,
+        "validate-recent-commit-emails-on-push": validate_recent_commit_emails_on_push,
         "forbid-commit-message-patterns": forbid_commit_message_patterns,
         "forbid-commit-message-patterns-on-push": forbid_commit_message_patterns_on_push,
         "forbid-trailers-on-push": forbid_trailers_on_push,

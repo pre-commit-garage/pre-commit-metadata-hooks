@@ -6,6 +6,22 @@
   pass_filenames: false
   always_run: true
 
+- id: validate-commit-emails
+  name: Validate commit emails
+  entry: pre-commit-metadata-hooks validate-commit-emails
+  language: python
+  stages: [pre-commit]
+  pass_filenames: false
+  always_run: true
+
+- id: validate-recent-commit-emails-on-push
+  name: Validate recent commit emails on push
+  entry: pre-commit-metadata-hooks validate-recent-commit-emails-on-push
+  language: python
+  stages: [pre-push]
+  pass_filenames: false
+  always_run: true
+
 - id: forbid-commit-message-patterns
   name: Forbid commit message patterns
   entry: pre-commit-metadata-hooks forbid-commit-message-patterns

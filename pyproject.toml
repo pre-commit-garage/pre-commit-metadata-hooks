@@ -5,6 +5,7 @@ description = "pre-commit hooks that guard commit metadata (by default, enforce 
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
+    "email-validator>=2.2",
     "GitPython>=3.1",
 ]
 [project.optional-dependencies]

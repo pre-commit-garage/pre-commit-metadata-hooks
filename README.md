@@ -1,17 +1,19 @@
 # pre-commit-metadata-hooks
 
-Metadata-focused hooks for `pre-commit` that keep commit history clean before it ever leaves your laptop. The package currently ships checks for signatures, message patterns, and common commit trailers, and the CLI is structured so more metadata rules can be layered on without forking.
+Metadata-focused hooks for `pre-commit` that keep commit history clean before it ever leaves your laptop. The package currently ships checks for signatures, commit email domains, message patterns, and common commit trailers, and the CLI is structured so more metadata rules can be layered on without forking.
 
 ## Available hooks
 
 | Hook id | Stage | What it enforces |
 | ------- | ----- | ---------------- |
 | `require-signed-commits` | `pre-push` | Blocks pushes that contain any commit missing a `gpgsig` header. |
+| `validate-commit-emails` | `pre-commit` | Fails before a commit is created when the current Git author or committer email is outside your allowed domain. |
+| `validate-recent-commit-emails-on-push` | `pre-push` | Checks a bounded window of recent commits from each pushed tip so older local history with the wrong email domain is still caught without scanning the whole repository. |
 | `forbid-commit-message-patterns` | `commit-msg` | Fails the commit if the subject (or whole message) matches one of the supplied regexes. |
 | `forbid-commit-message-patterns-on-push` | `pre-push` | Re-scans every commit about to be pushed for forbidden regex patterns. Useful when merges or rebases introduce bad subjects after the client-side commit-msg hook ran. |
 | `forbid-trailers-on-push` | `pre-push` | Rejects pushes that contain supported trailers you explicitly pick. This keeps the check tied to a known list so typos such as `Co-auhtored-by` fail early. |
 
-Each hook exposes CLI flags so you can tailor the behavior: regex hooks accept `--pattern`, `--ignore-case`, and `--subject-only`; the trailer hook accepts one or more `--trailer` arguments and an optional `--case-sensitive` flag.
+Each hook exposes CLI flags so you can tailor the behavior: email hooks accept `--domain`, and the push-time email hook also accepts `--max-count`; regex hooks accept `--pattern`, `--ignore-case`, and `--subject-only`; the trailer hook accepts one or more `--trailer` arguments and an optional `--case-sensitive` flag.
 
 ## Installation
 
@@ -32,6 +34,16 @@ repos:
     rev: v0.1.2
     hooks:
       - id: require-signed-commits
+      - id: validate-commit-emails
+        args:
+          - --domain
+          - company.com
+      - id: validate-recent-commit-emails-on-push
+        args:
+          - --domain
+          - company.com
+          - --max-count
+          - '50'
       - id: forbid-commit-message-patterns
         args:
           - --pattern
@@ -52,6 +64,8 @@ repos:
 ```
 
 Feel free to drop stages you do not need; each hook already declares sensible defaults.
+
+`validate-recent-commit-emails-on-push` exists because a normal `pre-commit` hook only checks the commit you are creating right now. It cannot protect you from older commits near the branch tip, such as a repository bootstrap commit or an early local commit created with the wrong Git identity. The push-time hook closes that gap while staying bounded: it inspects only a configurable number of recent commits from each pushed tip instead of walking full history.
 
 ### Supported commit trailers
 
@@ -77,6 +91,8 @@ pre-commit-metadata-hooks [command] [options]
 
 Commands:
   require-signed-commits (default)
+  validate-commit-emails
+  validate-recent-commit-emails-on-push
   forbid-commit-message-patterns
   forbid-commit-message-patterns-on-push
   forbid-trailers-on-push

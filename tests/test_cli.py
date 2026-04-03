@@ -10,6 +10,7 @@ from pre_commit_metadata_hooks.cli import (
     RevRange,
     combine_ranges,
     find_unsigned_commits,
+    iter_recent_commits,
     iter_commits_for_ranges,
     parse_pre_push_lines,
     parse_range_arg,
@@ -23,11 +24,15 @@ class DummyCommit:
         summary: str = "",
         message: str = "",
         gpgsig: str | None = None,
+        author_email: str = "dev@example.com",
+        committer_email: str | None = None,
     ) -> None:
         self.hexsha = hexsha
         self.summary = summary
         self.message = message
         self.gpgsig = gpgsig
+        self.author = type("Actor", (), {"email": author_email})()
+        self.committer = type("Actor", (), {"email": committer_email or author_email})()
 
 
 def test_parse_pre_push_lines_filters_zero_commits() -> None:
@@ -95,6 +100,30 @@ def test_iter_commits_for_ranges_reports_git_errors() -> None:
         list(iter_commits_for_ranges(ErrorRepo(), [RevRange(start=None, end="HEAD")]))
 
     assert "git error" in str(excinfo.value)
+
+
+def test_iter_recent_commits_limits_and_deduplicates() -> None:
+    first = DummyCommit("a" * 40)
+    second = DummyCommit("b" * 40)
+
+    class StubRepo:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        def iter_commits(self, rev: str, max_count: int):
+            self.calls.append((rev, max_count))
+            if rev == "branch-a":
+                yield first
+                yield second
+            else:
+                yield second
+
+    repo = StubRepo()
+
+    result = list(iter_recent_commits(repo, ["branch-a", "branch-b"], 5))
+
+    assert result == [first, second]
+    assert repo.calls == [("branch-a", 5), ("branch-b", 5)]
 
 
 def test_find_unsigned_commits_filters_signed() -> None:
@@ -210,6 +239,50 @@ def test_forbid_commit_message_patterns_accepts_body(tmp_path) -> None:
     assert result == 1
 
 
+def test_validate_commit_emails_blocks_wrong_domain(monkeypatch, capsys) -> None:
+    class Repo:
+        def __init__(self) -> None:
+            self.git = type(
+                "Git",
+                (),
+                {
+                    "var": lambda self, name: {
+                        "GIT_AUTHOR_IDENT": "Dev <dev@gmail.com> 0 +0000",
+                        "GIT_COMMITTER_IDENT": "Dev <dev@company.com> 0 +0000",
+                    }[name]
+                },
+            )()
+
+    monkeypatch.setattr(cli, "Repo", lambda repo_path: Repo())
+
+    result = cli.validate_commit_emails(["--domain", "company.com"])
+
+    assert result == 1
+    output = capsys.readouterr().err
+    assert "author" in output
+    assert "dev@gmail.com" in output
+    assert "@company.com" in output
+
+
+def test_validate_commit_emails_allows_matching_domain(monkeypatch) -> None:
+    class Repo:
+        def __init__(self) -> None:
+            self.git = type(
+                "Git",
+                (),
+                {
+                    "var": lambda self, name: {
+                        "GIT_AUTHOR_IDENT": "Dev <dev@company.com> 0 +0000",
+                        "GIT_COMMITTER_IDENT": "Dev <dev@company.com> 0 +0000",
+                    }[name]
+                },
+            )()
+
+    monkeypatch.setattr(cli, "Repo", lambda repo_path: Repo())
+
+    assert cli.validate_commit_emails(["--domain", "company.com"]) == 0
+
+
 def test_forbid_commit_message_patterns_invalid_regex(tmp_path) -> None:
     message_path = tmp_path / "COMMIT_EDITMSG"
     message_path.write_text("ok")
@@ -249,18 +322,13 @@ def test_main_rejects_unknown_command() -> None:
 
 def _patch_pre_push(monkeypatch, commit: DummyCommit) -> None:
     class RepoWithCommits:
-        def iter_commits(self, _: str):
+        def iter_commits(self, _: str, max_count: int | None = None):
             yield commit
 
     monkeypatch.setattr(
         cli,
         "read_pre_push_ranges",
         lambda stdin: [RevRange(start=None, end="HEAD")],
-    )
-    monkeypatch.setattr(
-        cli,
-        "combine_ranges",
-        lambda **kwargs: [RevRange(start=None, end="HEAD")],
     )
     monkeypatch.setattr(cli, "Repo", lambda repo_path: RepoWithCommits())
 
@@ -324,6 +392,39 @@ def test_forbid_trailers_on_push_rejects_unknown_trailer(monkeypatch) -> None:
 
     with pytest.raises(SystemExit):
         cli.forbid_trailers_on_push(["--trailer", "Co-auhtored-by"])
+
+
+def test_validate_recent_commit_emails_on_push_blocks_wrong_domain(
+    monkeypatch, capsys
+) -> None:
+    commit = DummyCommit("f" * 40, message="feat: add", author_email="dev@gmail.com")
+    _patch_pre_push(monkeypatch, commit)
+
+    result = cli.validate_recent_commit_emails_on_push(["--domain", "company.com"])
+
+    assert result == 1
+    output = capsys.readouterr().err
+    assert commit.hexsha in output
+    assert "author" in output
+    assert "dev@gmail.com" in output
+
+
+def test_validate_recent_commit_emails_on_push_allows_clean_history(
+    monkeypatch,
+) -> None:
+    commit = DummyCommit("1" * 40, message="feat: add", author_email="dev@company.com")
+    _patch_pre_push(monkeypatch, commit)
+
+    assert cli.validate_recent_commit_emails_on_push(["--domain", "company.com"]) == 0
+
+
+def test_validate_recent_commit_emails_on_push_rejects_invalid_max_count() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        cli.validate_recent_commit_emails_on_push(
+            ["--domain", "company.com", "--max-count", "0"]
+        )
+
+    assert "--max-count" in str(excinfo.value)
 
 
 def test_forbid_trailers_on_push_multi_trailers(monkeypatch, capsys) -> None:
