@@ -33,7 +33,7 @@ default_install_hook_types:
 
 repos:
   - repo: https://github.com/pre-commit-garage/pre-commit-metadata-hooks
-    rev: v0.1.4
+    rev: v0.1.5
     hooks:
       - id: require-signed-commits
       - id: validate-commit-emails
