@@ -15,6 +15,7 @@ from git import Commit, GitCommandError, Repo
 
 ZERO_COMMIT = "0" * 40
 GIT_IDENT_PATTERN = re.compile(r"^.+ <(?P<email>[^>]+)> \d+ [+-]\d{4}$")
+PLATFORM_COMMITTER_EMAILS = frozenset({"noreply@github.com"})
 TRAILER_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):\s*(.+)$")
 SUPPORTED_TRAILERS = [
     "Signed-off-by",
@@ -226,13 +227,20 @@ def extract_email_from_git_ident(ident: str) -> str:
     return match.group("email")
 
 
-def check_email_domain(email: str, required_domain: str) -> Optional[tuple[str, str]]:
+def check_email_domain(
+    email: str, required_domain: str, *, allow_platform_committer: bool = False
+) -> Optional[tuple[str, str]]:
     try:
         validated = validate_email(email.strip(), check_deliverability=False)
     except EmailNotValidError as exc:
         return email.strip(), str(exc)
 
     normalized_email = validated.normalized
+    if (
+        allow_platform_committer
+        and normalized_email.casefold() in PLATFORM_COMMITTER_EMAILS
+    ):
+        return None
     if validated.domain.casefold() != required_domain:
         return normalized_email, f"expected @{required_domain}"
     return None
@@ -320,7 +328,11 @@ def validate_commit_emails(argv: Optional[List[str]] = None) -> int:
         except GitCommandError as exc:
             raise SystemExit(f"failed to resolve {git_var}: {exc}") from exc
         email = extract_email_from_git_ident(ident)
-        violation = check_email_domain(email, required_domain)
+        violation = check_email_domain(
+            email,
+            required_domain,
+            allow_platform_committer=label == "committer",
+        )
         if violation:
             normalized_email, reason = violation
             violations.append(
@@ -522,7 +534,11 @@ def validate_recent_commit_emails_on_push(argv: Optional[List[str]] = None) -> i
     for commit in iter_recent_commits(repo, refs_to_scan, args.max_count):
         for role, actor in (("author", commit.author), ("committer", commit.committer)):
             email = getattr(actor, "email", "") or ""
-            violation = check_email_domain(email, required_domain)
+            violation = check_email_domain(
+                email,
+                required_domain,
+                allow_platform_committer=role == "committer",
+            )
             if not violation:
                 continue
             normalized_email, reason = violation

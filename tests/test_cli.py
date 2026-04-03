@@ -283,6 +283,25 @@ def test_validate_commit_emails_allows_matching_domain(monkeypatch) -> None:
     assert cli.validate_commit_emails(["--domain", "company.com"]) == 0
 
 
+def test_validate_commit_emails_allows_platform_committer(monkeypatch) -> None:
+    class Repo:
+        def __init__(self) -> None:
+            self.git = type(
+                "Git",
+                (),
+                {
+                    "var": lambda self, name: {
+                        "GIT_AUTHOR_IDENT": "Dev <dev@company.com> 0 +0000",
+                        "GIT_COMMITTER_IDENT": "GitHub <noreply@github.com> 0 +0000",
+                    }[name]
+                },
+            )()
+
+    monkeypatch.setattr(cli, "Repo", lambda repo_path: Repo())
+
+    assert cli.validate_commit_emails(["--domain", "company.com"]) == 0
+
+
 def test_forbid_commit_message_patterns_invalid_regex(tmp_path) -> None:
     message_path = tmp_path / "COMMIT_EDITMSG"
     message_path.write_text("ok")
@@ -413,6 +432,20 @@ def test_validate_recent_commit_emails_on_push_allows_clean_history(
     monkeypatch,
 ) -> None:
     commit = DummyCommit("1" * 40, message="feat: add", author_email="dev@company.com")
+    _patch_pre_push(monkeypatch, commit)
+
+    assert cli.validate_recent_commit_emails_on_push(["--domain", "company.com"]) == 0
+
+
+def test_validate_recent_commit_emails_on_push_allows_platform_committer(
+    monkeypatch,
+) -> None:
+    commit = DummyCommit(
+        "2" * 40,
+        message="feat: add",
+        author_email="dev@company.com",
+        committer_email="noreply@github.com",
+    )
     _patch_pre_push(monkeypatch, commit)
 
     assert cli.validate_recent_commit_emails_on_push(["--domain", "company.com"]) == 0

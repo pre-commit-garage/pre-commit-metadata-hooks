@@ -15,6 +15,8 @@ Metadata-focused hooks for `pre-commit` that keep commit history clean before it
 
 Each hook exposes CLI flags so you can tailor the behavior: email hooks accept `--domain`, and the push-time email hook also accepts `--max-count`; regex hooks accept `--pattern`, `--ignore-case`, and `--subject-only`; the trailer hook accepts one or more `--trailer` arguments and an optional `--case-sensitive` flag.
 
+The email hooks allow one built-in exception for platform-managed committers: `noreply@github.com`. This keeps commits created or rewritten by GitHub from failing the domain check, while still requiring human author emails to match your configured domain.
+
 ## Installation
 
 ```sh
